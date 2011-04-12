@@ -449,6 +449,55 @@ __global__ void aos_kernel(
   }
 }
 
+__global__ void gather_kernel(
+  int nparticles,
+  double3 *force_delta, double3 *torquei_delta, double3 *torquej_delta,
+  int *ioffset, int *icount, int *imapinv,
+  int *joffset, int *jcount, int *jmapinv,
+  //outputs
+  double *force, double *torque) {
+
+  int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  if (idx < nparticles) {
+    double fdelta[3] = {0.0, 0.0, 0.0};
+    double tdelta[3] = {0.0, 0.0, 0.0};
+
+    int ioff = ioffset[idx];
+    for (int i=0; i<icount[idx]; i++) {
+      int e = imapinv[ioff+i];
+      fdelta[0] += force_delta[e].x;
+      fdelta[1] += force_delta[e].y;
+      fdelta[2] += force_delta[e].z;
+
+      tdelta[0] += torquei_delta[e].x;
+      tdelta[1] += torquei_delta[e].y;
+      tdelta[2] += torquei_delta[e].z;
+    }
+
+    int joff = joffset[idx];
+    for (int i=0; i<jcount[idx]; i++) {
+      int e = jmapinv[joff+i];
+
+      fdelta[0] -= force_delta[e].x;
+      fdelta[1] -= force_delta[e].y;
+      fdelta[2] -= force_delta[e].z;
+
+      tdelta[0] += torquej_delta[e].x;
+      tdelta[1] += torquej_delta[e].y;
+      tdelta[2] += torquej_delta[e].z;
+    }
+
+    //output
+    force[(idx*3)]   += fdelta[0];
+    force[(idx*3)+1] += fdelta[1];
+    force[(idx*3)+2] += fdelta[1];
+
+    torque[(idx*3)]   += tdelta[0];
+    torque[(idx*3)+1] += tdelta[1];
+    torque[(idx*3)+2] += tdelta[1];
+  }
+}
+
 // --------------------------------------------------------------------------
 // HOST SIDE PRE AND POST PROCESS
 // --------------------------------------------------------------------------
@@ -461,7 +510,7 @@ bool check_result_vector(const char* id, double expected[3], double actual[3], c
                fabs(expected[2] - actual[2]) > epsilon);
   const char *marker = flag ? "***" : "   ";
 
-  if (flag || verbose) {
+  if (flag && verbose) {
     printf("%s%s: {%.16f, %.16f, %.16f} / {%.16f, %.16f, %.16f}%s\n",
         marker,
         id,
@@ -485,6 +534,62 @@ double array_of_struct(int argc, char **argv,
   timers[0].set_name("AoS malloc, copy and memcpy to dev");
   timers[1].set_name("Pairwise kernel");
   timers[2].set_name("Result memcpy to host and post-process");
+  timers[3].set_name("Gather kernel");
+
+  //--------------------
+  // One-time only costs
+  //--------------------
+
+  //inverse mappings for (i,j) particle pairs
+  int *imap = new int[input->nedge];
+  int *jmap = new int[input->nedge];
+  for (int e=0; e<input->nedge; e++) {
+    imap[e] = input->edge[(e*2)  ];
+    jmap[e] = input->edge[(e*2)+1];
+  }
+  int *ioffset = NULL;
+  int *icount = NULL;
+  int *imapinv = NULL;
+  int *joffset = NULL;
+  int *jcount = NULL;
+  int *jmapinv = NULL;
+  build_inverse_map(imap, input->nedge, input->nnode,
+    ioffset, icount, imapinv);
+  build_inverse_map(jmap, input->nedge, input->nnode,
+    joffset, jcount, jmapinv);
+
+  int *d_ioffset;
+  int *d_icount;
+  int *d_imapinv;
+  int *d_joffset;
+  int *d_jcount;
+  int *d_jmapinv;
+  const int d_nnode_size = input->nnode * sizeof(int);
+  const int d_nedge_size = input->nedge * sizeof(int);
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_ioffset, d_nnode_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_icount, d_nnode_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_imapinv, d_nedge_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_joffset, d_nnode_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_jcount, d_nnode_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_jmapinv, d_nedge_size));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_ioffset, ioffset, d_nnode_size, cudaMemcpyHostToDevice));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_icount, icount, d_nnode_size, cudaMemcpyHostToDevice));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_imapinv, imapinv, d_nedge_size, cudaMemcpyHostToDevice));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_joffset, joffset, d_nnode_size, cudaMemcpyHostToDevice));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_jcount, jcount, d_nnode_size, cudaMemcpyHostToDevice));
+  ASSERT_NO_CUDA_ERROR(
+    cudaMemcpy(d_jmapinv, jmapinv, d_nedge_size, cudaMemcpyHostToDevice));
 
   double time = 0.0;
 
@@ -565,56 +670,17 @@ double array_of_struct(int argc, char **argv,
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_shear, shear, d_delta_size, cudaMemcpyHostToDevice));
 
-    //unzip edge into imap and jmap
-    int *imap = new int[input->nedge];
-    int *jmap = new int[input->nedge];
-    for (int e=0; e<input->nedge; e++) {
-      imap[e] = input->edge[(e*2)  ];
-      jmap[e] = input->edge[(e*2)+1];
-    }
-    int *ioffset = NULL;
-    int *icount = NULL;
-    int *imapinv = NULL;
-    int *joffset = NULL;
-    int *jcount = NULL;
-    int *jmapinv = NULL;
-    build_inverse_map(imap, input->nedge, input->nnode,
-      ioffset, icount, imapinv);
-    build_inverse_map(jmap, input->nedge, input->nnode,
-      joffset, jcount, jmapinv);
-
-    int *d_ioffset;
-    int *d_icount;
-    int *d_imapinv;
-    int *d_joffset;
-    int *d_jcount;
-    int *d_jmapinv;
-    const int d_nnode_size = input->nnode * sizeof(int);
-    const int d_nedge_size = input->nedge * sizeof(int);
+    double *d_force;
+    double *d_torque;
+    const int d_output_size = input->nedge * 3 * sizeof(double);
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_ioffset, d_nnode_size));
+      cudaMalloc((void **)&d_force, d_output_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_icount, d_nnode_size));
+      cudaMalloc((void **)&d_torque, d_output_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_imapinv, d_nedge_size));
+      cudaMemcpy(d_force, input->force, d_output_size, cudaMemcpyHostToDevice));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_joffset, d_nnode_size));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_jcount, d_nnode_size));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_jmapinv, d_nedge_size));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_ioffset, ioffset, d_nnode_size, cudaMemcpyHostToDevice));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_icount, icount, d_nnode_size, cudaMemcpyHostToDevice));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_imapinv, imapinv, d_nedge_size, cudaMemcpyHostToDevice));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_joffset, joffset, d_nnode_size, cudaMemcpyHostToDevice));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_jcount, jcount, d_nnode_size, cudaMemcpyHostToDevice));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_jmapinv, jmapinv, d_nedge_size, cudaMemcpyHostToDevice));
+      cudaMemcpy(d_torque, input->torque, d_output_size, cudaMemcpyHostToDevice));
     timers[0].stop();
 
     cudaError_t err = cudaGetLastError();
@@ -636,20 +702,42 @@ double array_of_struct(int argc, char **argv,
       d_force_delta, d_torquei_delta, d_torquej_delta, d_shear);
     timers[1].stop();
 
-    cudaThreadSynchronize();
-#ifdef KERNEL_PRINT
-    cudaPrintfDisplay(stdout, true);
-    cudaPrintfEnd();
-#endif
-
     err = cudaGetLastError();
     if (err != cudaSuccess) {
       printf("Post-kernel error: %s.\n", cudaGetErrorString(err));
       exit(1);
     }
 
+    const int gatherBlockSize = 128;
+    dim3 gatherGridSize((input->nnode / gatherBlockSize)+1);
+    timers[3].start();
+    gather_kernel<<<gatherGridSize, gatherBlockSize>>>(
+      input->nnode,
+      d_force_delta, d_torquei_delta, d_torquej_delta,
+      d_ioffset, d_icount, d_imapinv,
+      d_joffset, d_jcount, d_jmapinv,
+      d_force, d_torque);
+    timers[3].stop();
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      printf("Post-gather error: %s.\n", cudaGetErrorString(err));
+      exit(1);
+    }
+
+    cudaThreadSynchronize();
+#ifdef KERNEL_PRINT
+    cudaPrintfDisplay(stdout, true);
+    cudaPrintfEnd();
+#endif
+
     //postprocessing
     timers[2].start();
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(input->force, d_force, d_output_size, cudaMemcpyDeviceToHost));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(input->torque, d_torque, d_output_size, cudaMemcpyDeviceToHost));
+#if 0
     double3 *force = new double3[input->nedge];
     double3 *torque = new double3[input->nedge];
     double3 *torquej = new double3[input->nedge];
@@ -659,9 +747,12 @@ double array_of_struct(int argc, char **argv,
       cudaMemcpy(torque, d_torquei_delta, d_delta_size, cudaMemcpyDeviceToHost));
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(torquej, d_torquej_delta, d_delta_size, cudaMemcpyDeviceToHost));
+#endif
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(shear, d_shear, d_delta_size, cudaMemcpyDeviceToHost));
+
     for (int e=0; e<input->nedge; e++) {
+#if 0
       int i = input->edge[(e*2)];
       int j = input->edge[(e*2)+1];
       input->force[(i*3)]   += force[e].x;
@@ -679,7 +770,7 @@ double array_of_struct(int argc, char **argv,
       input->torque[(j*3)]   += torquej[e].x;
       input->torque[(j*3)+1] += torquej[e].y;
       input->torque[(j*3)+2] += torquej[e].z;
-
+#endif
       input->shear[(e*3)]   = shear[e].x;
       input->shear[(e*3)+1] = shear[e].y;
       input->shear[(e*3)+2] = shear[e].z;
@@ -689,10 +780,12 @@ double array_of_struct(int argc, char **argv,
     timers[0].add_to_total();
     timers[1].add_to_total();
     timers[2].add_to_total();
+    timers[3].add_to_total();
 
     //only check results the first time around
     if (run == 0) {
-      double epsilon = 0.000001;
+      const double epsilon = 0.000001;
+      int nerror = 0;
       for (int n=0; n<input->nnode; n++) {
         bool flag =
           check_result_vector(
@@ -703,10 +796,14 @@ double array_of_struct(int argc, char **argv,
             &expected_output->torque[(n*3)], &input->torque[(n*3)], epsilon);
 
         if (flag) {
+          nerror++;
+#if 0
           printf("Mismatch between output and expected output");
           exit(-1);
+#endif
         }
       }
+      printf("Num errors: %d\n", nerror);
 
       for (int n=0; n<input->nedge; n++) {
         bool flag = check_result_vector(
@@ -727,8 +824,15 @@ double array_of_struct(int argc, char **argv,
     cudaFree(d_shear);
   }
 
+  cudaFree(d_ioffset);
+  cudaFree(d_icount);
+  cudaFree(d_imapinv);
+  cudaFree(d_joffset);
+  cudaFree(d_jcount);
+  cudaFree(d_jmapinv);
+
   printf("Timer breakdown\n");
-  for (int i=0; i<3; i++) {
+  for (int i=0; i<4; i++) {
     printf("%d [%s] %.1fms\n", i, timers[i].get_name().c_str(), timers[i].total_time());
     time += timers[i].total_time();
   }
