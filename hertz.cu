@@ -565,7 +565,56 @@ double array_of_struct(int argc, char **argv,
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_shear, shear, d_delta_size, cudaMemcpyHostToDevice));
 
+    //unzip edge into imap and jmap
+    int *imap = new int[input->nedge];
+    int *jmap = new int[input->nedge];
+    for (int e=0; e<input->nedge; e++) {
+      imap[e] = input->edge[(e*2)  ];
+      jmap[e] = input->edge[(e*2)+1];
+    }
+    int *ioffset = NULL;
+    int *icount = NULL;
+    int *imapinv = NULL;
+    int *joffset = NULL;
+    int *jcount = NULL;
+    int *jmapinv = NULL;
+    build_inverse_map(imap, input->nedge, input->nnode,
+      ioffset, icount, imapinv);
+    build_inverse_map(jmap, input->nedge, input->nnode,
+      joffset, jcount, jmapinv);
 
+    int *d_ioffset;
+    int *d_icount;
+    int *d_imapinv;
+    int *d_joffset;
+    int *d_jcount;
+    int *d_jmapinv;
+    const int d_nnode_size = input->nnode * sizeof(int);
+    const int d_nedge_size = input->nedge * sizeof(int);
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_ioffset, d_nnode_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_icount, d_nnode_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_imapinv, d_nedge_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_joffset, d_nnode_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_jcount, d_nnode_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_jmapinv, d_nedge_size));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_ioffset, ioffset, d_nnode_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_icount, icount, d_nnode_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_imapinv, imapinv, d_nedge_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_joffset, joffset, d_nnode_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_jcount, jcount, d_nnode_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_jmapinv, jmapinv, d_nedge_size, cudaMemcpyHostToDevice));
     timers[0].stop();
 
     cudaError_t err = cudaGetLastError();
