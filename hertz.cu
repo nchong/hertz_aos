@@ -407,9 +407,6 @@ double array_of_struct(int argc, char **argv,
 
     //preprocessing
     struct contact *aos = new contact[input->nedge];
-    double3 *force = new double3[input->nedge];
-    double3 *torque = new double3[input->nedge];
-    double3 *torquej = new double3[input->nedge];
     double3 *shear = new double3[input->nedge];
     for (int e=0; e<input->nedge; e++) {
       int i = input->edge[(e*2)];
@@ -460,27 +457,27 @@ double array_of_struct(int argc, char **argv,
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_aos, aos, d_aos_size, cudaMemcpyHostToDevice));
 
-    double3 *d_force;
-    double3 *d_torque;
-    double3 *d_torquej;
+    double3 *d_force_delta;
+    double3 *d_torquei_delta;
+    double3 *d_torquej_delta;
     double3 *d_shear;
-    const int d_output_size = input->nedge * sizeof(double3);
+    const int d_delta_size = input->nedge * sizeof(double3);
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_force, d_output_size));
+      cudaMalloc((void **)&d_force_delta, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_torque, d_output_size));
+      cudaMalloc((void **)&d_torquei_delta, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_torquej, d_output_size));
+      cudaMalloc((void **)&d_torquej_delta, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_shear, d_output_size));
+      cudaMalloc((void **)&d_shear, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemset((void *)d_force, 0, d_output_size));
+      cudaMemset((void *)d_force_delta, 0, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemset((void *)d_torque, 0, d_output_size));
+      cudaMemset((void *)d_torquei_delta, 0, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemset((void *)d_torquej, 0, d_output_size));
+      cudaMemset((void *)d_torquej_delta, 0, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_shear, shear, d_output_size, cudaMemcpyHostToDevice));
+      cudaMemcpy(d_shear, shear, d_delta_size, cudaMemcpyHostToDevice));
     timers[0].stop();
 
     cudaError_t err = cudaGetLastError();
@@ -499,7 +496,7 @@ double array_of_struct(int argc, char **argv,
     aos_kernel<<<gridSize, blockSize>>>(
       input->nedge,
       d_aos,
-      d_force, d_torque, d_torquej, d_shear);
+      d_force_delta, d_torquei_delta, d_torquej_delta, d_shear);
     timers[1].stop();
 
     cudaThreadSynchronize();
@@ -516,14 +513,17 @@ double array_of_struct(int argc, char **argv,
 
     //postprocessing
     timers[2].start();
+    double3 *force = new double3[input->nedge];
+    double3 *torque = new double3[input->nedge];
+    double3 *torquej = new double3[input->nedge];
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(force, d_force, d_output_size, cudaMemcpyDeviceToHost));
+      cudaMemcpy(force, d_force_delta, d_delta_size, cudaMemcpyDeviceToHost));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(torque, d_torque, d_output_size, cudaMemcpyDeviceToHost));
+      cudaMemcpy(torque, d_torquei_delta, d_delta_size, cudaMemcpyDeviceToHost));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(torquej, d_torquej, d_output_size, cudaMemcpyDeviceToHost));
+      cudaMemcpy(torquej, d_torquej_delta, d_delta_size, cudaMemcpyDeviceToHost));
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(shear, d_shear, d_output_size, cudaMemcpyDeviceToHost));
+      cudaMemcpy(shear, d_shear, d_delta_size, cudaMemcpyDeviceToHost));
     for (int e=0; e<input->nedge; e++) {
       int i = input->edge[(e*2)];
       int j = input->edge[(e*2)+1];
@@ -584,9 +584,9 @@ double array_of_struct(int argc, char **argv,
     //cleanup
     delete[] aos;
     cudaFree(d_aos);
-    cudaFree(d_force);
-    cudaFree(d_torque);
-    cudaFree(d_torquej);
+    cudaFree(d_force_delta);
+    cudaFree(d_torquei_delta);
+    cudaFree(d_torquej_delta);
     cudaFree(d_shear);
   }
 
