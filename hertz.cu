@@ -263,7 +263,7 @@ __global__ void aos_kernel(
   struct contact *aos,
   double3 *force,
   double3 *torque, double3 *torquej,
-  double3 *shear) {
+  double  *shear) {
   //TODO: don't hardcode, push these into constant memory
   double dt = 0.00001;
   double nktv2p = 1;
@@ -302,7 +302,7 @@ __global__ void aos_kernel(
     cuPrintf("torquej = {%f, %f, %f}\n",
       torquej[idx].x, torquej[idx].y, torquej[idx].z);
     cuPrintf("shear = {%f, %f, %f}\n",
-      shear[idx].x, shear[idx].y, shear[idx].z);
+      shear[(idx*3)], shear[(idx*3)+1], shear[(idx*3)+2]);
 #endif
 
     // del is the vector from j to i
@@ -314,9 +314,9 @@ __global__ void aos_kernel(
     double radsum = c.radiusi + c.radiusj;
     if (rsq >= radsum*radsum) {
       //unset non-touching atoms
-      shear[idx].x = 0.0;
-      shear[idx].y = 0.0;
-      shear[idx].z = 0.0;
+      shear[(idx*3)  ] = 0.0;
+      shear[(idx*3)+1] = 0.0;
+      shear[(idx*3)+2] = 0.0;
     } else {
       //distance between centres of atoms i and j
       //or, magnitude of del vector
@@ -377,35 +377,37 @@ __global__ void aos_kernel(
       double vtr3 = vt3 - (dely*wr1-delx*wr2);
 
       // shear history effects
-      shear[idx].x += vtr1 * dt;
-      shear[idx].y += vtr2 * dt;
-      shear[idx].z += vtr3 * dt;
+      shear[(idx*3)  ] += vtr1 * dt;
+      shear[(idx*3)+1] += vtr2 * dt;
+      shear[(idx*3)+2] += vtr3 * dt;
 
       // rotate shear displacements
-      double rsht = shear[idx].x*delx + shear[idx].y*dely + shear[idx].z*delz;
+      double rsht = shear[(idx*3)  ]*delx + 
+                    shear[(idx*3)+1]*dely + 
+                    shear[(idx*3)+2]*delz;
       rsht *= rsqinv;
 
-      shear[idx].x -= rsht*delx;
-      shear[idx].y -= rsht*dely;
-      shear[idx].z -= rsht*delz;
+      shear[(idx*3)  ] -= rsht*delx;
+      shear[(idx*3)+1] -= rsht*dely;
+      shear[(idx*3)+2] -= rsht*delz;
 
       // tangential forces = shear + tangential velocity damping
-      double fs1 = - (kt*shear[idx].x + gammat*vtr1);
-      double fs2 = - (kt*shear[idx].y + gammat*vtr2);
-      double fs3 = - (kt*shear[idx].z + gammat*vtr3);
+      double fs1 = - (kt*shear[(idx*3)  ] + gammat*vtr1);
+      double fs2 = - (kt*shear[(idx*3)+1] + gammat*vtr2);
+      double fs3 = - (kt*shear[(idx*3)+2] + gammat*vtr3);
 
       // rescale frictional displacements and forces if needed
       double fs = sqrt(fs1*fs1 + fs2*fs2 + fs3*fs3);
       double fn = xmu * fabs(ccel*r);
       double shrmag = 0;
       if (fs > fn) {
-        shrmag = sqrt(shear[idx].x*shear[idx].x +
-            shear[idx].y*shear[idx].y +
-            shear[idx].z*shear[idx].z);
+        shrmag = sqrt(shear[(idx*3)  ]*shear[(idx*3)  ] +
+                      shear[(idx*3)+1]*shear[(idx*3)+1] +
+                      shear[(idx*3)+2]*shear[(idx*3)+2]);
         if (shrmag != 0.0) {
-          shear[idx].x = (fn/fs) * (shear[idx].x + gammat*vtr1/kt) - gammat*vtr1/kt;
-          shear[idx].y = (fn/fs) * (shear[idx].y + gammat*vtr2/kt) - gammat*vtr2/kt;
-          shear[idx].z = (fn/fs) * (shear[idx].z + gammat*vtr3/kt) - gammat*vtr3/kt;
+          shear[(idx*3)  ] = (fn/fs) * (shear[(idx*3)  ] + gammat*vtr1/kt) - gammat*vtr1/kt;
+          shear[(idx*3)+1] = (fn/fs) * (shear[(idx*3)+1] + gammat*vtr2/kt) - gammat*vtr2/kt;
+          shear[(idx*3)+2] = (fn/fs) * (shear[(idx*3)+2] + gammat*vtr3/kt) - gammat*vtr3/kt;
           fs1 *= fn/fs;
           fs2 *= fn/fs;
           fs3 *= fn/fs;
@@ -443,7 +445,7 @@ __global__ void aos_kernel(
       cuPrintf("torquej' = {%f, %f, %f}\n",
         torquej[idx].x, torquej[idx].y, torquej[idx].z);
       cuPrintf("shear' = {%f, %f, %f}\n",
-        shear[idx].x, shear[idx].y, shear[idx].z);
+        shear[(idx*3)], shear[(idx*3)+1], shear[(idx*3)+2]);
 #endif
     }
   }
@@ -536,10 +538,13 @@ double array_of_struct(int argc, char **argv,
   timers[2].set_name("Result memcpy to host and post-process");
   timers[3].set_name("Gather kernel");
 
+  timers[4].set_name("Build inverse mappings for gather kernel");
+
   //--------------------
   // One-time only costs
   //--------------------
 
+  timers[4].start();
   //inverse mappings for (i,j) particle pairs
   int *imap = new int[input->nedge];
   int *jmap = new int[input->nedge];
@@ -590,6 +595,8 @@ double array_of_struct(int argc, char **argv,
     cudaMemcpy(d_jcount, jcount, d_nnode_size, cudaMemcpyHostToDevice));
   ASSERT_NO_CUDA_ERROR(
     cudaMemcpy(d_jmapinv, jmapinv, d_nedge_size, cudaMemcpyHostToDevice));
+  timers[4].stop();
+  timers[4].add_to_total();
 
   double time = 0.0;
 
@@ -651,7 +658,6 @@ double array_of_struct(int argc, char **argv,
     double3 *d_force_delta;
     double3 *d_torquei_delta;
     double3 *d_torquej_delta;
-    double3 *d_shear;
     const int d_delta_size = input->nedge * sizeof(double3);
     ASSERT_NO_CUDA_ERROR(
       cudaMalloc((void **)&d_force_delta, d_delta_size));
@@ -660,27 +666,28 @@ double array_of_struct(int argc, char **argv,
     ASSERT_NO_CUDA_ERROR(
       cudaMalloc((void **)&d_torquej_delta, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_shear, d_delta_size));
-    ASSERT_NO_CUDA_ERROR(
       cudaMemset((void *)d_force_delta, 0, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
       cudaMemset((void *)d_torquei_delta, 0, d_delta_size));
     ASSERT_NO_CUDA_ERROR(
       cudaMemset((void *)d_torquej_delta, 0, d_delta_size));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(d_shear, shear, d_delta_size, cudaMemcpyHostToDevice));
 
     double *d_force;
     double *d_torque;
+    double *d_shear;
     const int d_output_size = input->nedge * 3 * sizeof(double);
     ASSERT_NO_CUDA_ERROR(
       cudaMalloc((void **)&d_force, d_output_size));
     ASSERT_NO_CUDA_ERROR(
       cudaMalloc((void **)&d_torque, d_output_size));
     ASSERT_NO_CUDA_ERROR(
+      cudaMalloc((void **)&d_shear, d_output_size));
+    ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_force, input->force, d_output_size, cudaMemcpyHostToDevice));
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_torque, input->torque, d_output_size, cudaMemcpyHostToDevice));
+    ASSERT_NO_CUDA_ERROR(
+      cudaMemcpy(d_shear, input->shear, d_output_size, cudaMemcpyHostToDevice));
     timers[0].stop();
 
     cudaError_t err = cudaGetLastError();
@@ -737,44 +744,8 @@ double array_of_struct(int argc, char **argv,
       cudaMemcpy(input->force, d_force, d_output_size, cudaMemcpyDeviceToHost));
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(input->torque, d_torque, d_output_size, cudaMemcpyDeviceToHost));
-#if 0
-    double3 *force = new double3[input->nedge];
-    double3 *torque = new double3[input->nedge];
-    double3 *torquej = new double3[input->nedge];
     ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(force, d_force_delta, d_delta_size, cudaMemcpyDeviceToHost));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(torque, d_torquei_delta, d_delta_size, cudaMemcpyDeviceToHost));
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(torquej, d_torquej_delta, d_delta_size, cudaMemcpyDeviceToHost));
-#endif
-    ASSERT_NO_CUDA_ERROR(
-      cudaMemcpy(shear, d_shear, d_delta_size, cudaMemcpyDeviceToHost));
-
-    for (int e=0; e<input->nedge; e++) {
-#if 0
-      int i = input->edge[(e*2)];
-      int j = input->edge[(e*2)+1];
-      input->force[(i*3)]   += force[e].x;
-      input->force[(i*3)+1] += force[e].y;
-      input->force[(i*3)+2] += force[e].z;
-
-      input->force[(j*3)]   -= force[e].x;
-      input->force[(j*3)+1] -= force[e].y;
-      input->force[(j*3)+2] -= force[e].z;
-
-      input->torque[(i*3)]   += torque[e].x;
-      input->torque[(i*3)+1] += torque[e].y;
-      input->torque[(i*3)+2] += torque[e].z;
-
-      input->torque[(j*3)]   += torquej[e].x;
-      input->torque[(j*3)+1] += torquej[e].y;
-      input->torque[(j*3)+2] += torquej[e].z;
-#endif
-      input->shear[(e*3)]   = shear[e].x;
-      input->shear[(e*3)+1] = shear[e].y;
-      input->shear[(e*3)+2] = shear[e].z;
-    }
+      cudaMemcpy(input->shear, d_shear, d_delta_size, cudaMemcpyDeviceToHost));
     timers[2].stop();
 
     timers[0].add_to_total();
@@ -831,6 +802,10 @@ double array_of_struct(int argc, char **argv,
   cudaFree(d_jcount);
   cudaFree(d_jmapinv);
 
+  printf("One time costs\n");
+  for (int i=4; i<5; i++) {
+    printf("%d [%s] %.1fms\n", i, timers[i].get_name().c_str(), timers[i].total_time());
+  }
   printf("Timer breakdown\n");
   for (int i=0; i<4; i++) {
     printf("%d [%s] %.1fms\n", i, timers[i].get_name().c_str(), timers[i].total_time());
