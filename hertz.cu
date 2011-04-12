@@ -538,13 +538,67 @@ double array_of_struct(int argc, char **argv,
   timers[2].set_name("Result memcpy to host and post-process");
   timers[3].set_name("Gather kernel");
 
-  timers[4].set_name("Build inverse mappings for gather kernel");
+  timers[4].set_name("AoS generate");
+  timers[5].set_name("Build inverse mappings for gather kernel");
 
   //--------------------
   // One-time only costs
   //--------------------
 
+  //AoS generate
   timers[4].start();
+  struct contact *aos = new contact[input->nedge];
+  double3 *shear = new double3[input->nedge];
+  for (int e=0; e<input->nedge; e++) {
+    int i = input->edge[(e*2)];
+    int j = input->edge[(e*2)+1];
+
+    aos[e].i = i;
+    aos[e].j = j;
+
+    aos[e].xi[0] = input->x[(i*3)];
+    aos[e].xi[1] = input->x[(i*3)+1];
+    aos[e].xi[2] = input->x[(i*3)+2];
+    aos[e].xj[0] = input->x[(j*3)];
+    aos[e].xj[1] = input->x[(j*3)+1];
+    aos[e].xj[2] = input->x[(j*3)+2];
+
+    aos[e].vi[0] = input->v[(i*3)];
+    aos[e].vi[1] = input->v[(i*3)+1];
+    aos[e].vi[2] = input->v[(i*3)+2];
+    aos[e].vj[0] = input->v[(j*3)];
+    aos[e].vj[1] = input->v[(j*3)+1];
+    aos[e].vj[2] = input->v[(j*3)+2];
+
+    aos[e].omegai[0] = input->omega[(i*3)];
+    aos[e].omegai[1] = input->omega[(i*3)+1];
+    aos[e].omegai[2] = input->omega[(i*3)+2];
+    aos[e].omegaj[0] = input->omega[(j*3)];
+    aos[e].omegaj[1] = input->omega[(j*3)+1];
+    aos[e].omegaj[2] = input->omega[(j*3)+2];
+
+    aos[e].radiusi = input->radius[i];
+    aos[e].radiusj = input->radius[j];
+
+    aos[e].massi = input->mass[i];
+    aos[e].massj = input->mass[j];
+
+    aos[e].typei = input->type[i];
+    aos[e].typej = input->type[j];
+
+    shear[e].x = input->shear[(e*3)];
+    shear[e].y = input->shear[(e*3)+1];
+    shear[e].z = input->shear[(e*3)+2];
+  }
+
+  struct contact *d_aos;
+  const int d_aos_size = input->nedge * sizeof(struct contact);
+  ASSERT_NO_CUDA_ERROR(
+    cudaMalloc((void **)&d_aos, d_aos_size));
+  timers[4].stop();
+  timers[4].add_to_total();
+
+  timers[5].start();
   //inverse mappings for (i,j) particle pairs
   int *imap = new int[input->nedge];
   int *jmap = new int[input->nedge];
@@ -595,8 +649,8 @@ double array_of_struct(int argc, char **argv,
     cudaMemcpy(d_jcount, jcount, d_nnode_size, cudaMemcpyHostToDevice));
   ASSERT_NO_CUDA_ERROR(
     cudaMemcpy(d_jmapinv, jmapinv, d_nedge_size, cudaMemcpyHostToDevice));
-  timers[4].stop();
-  timers[4].add_to_total();
+  timers[5].stop();
+  timers[5].add_to_total();
 
   double time = 0.0;
 
@@ -604,57 +658,8 @@ double array_of_struct(int argc, char **argv,
     timers[0].start();
 
     //preprocessing
-    struct contact *aos = new contact[input->nedge];
-    double3 *shear = new double3[input->nedge];
-    for (int e=0; e<input->nedge; e++) {
-      int i = input->edge[(e*2)];
-      int j = input->edge[(e*2)+1];
-
-      aos[e].i = i;
-      aos[e].j = j;
-
-      aos[e].xi[0] = input->x[(i*3)];
-      aos[e].xi[1] = input->x[(i*3)+1];
-      aos[e].xi[2] = input->x[(i*3)+2];
-      aos[e].xj[0] = input->x[(j*3)];
-      aos[e].xj[1] = input->x[(j*3)+1];
-      aos[e].xj[2] = input->x[(j*3)+2];
-
-      aos[e].vi[0] = input->v[(i*3)];
-      aos[e].vi[1] = input->v[(i*3)+1];
-      aos[e].vi[2] = input->v[(i*3)+2];
-      aos[e].vj[0] = input->v[(j*3)];
-      aos[e].vj[1] = input->v[(j*3)+1];
-      aos[e].vj[2] = input->v[(j*3)+2];
-
-      aos[e].omegai[0] = input->omega[(i*3)];
-      aos[e].omegai[1] = input->omega[(i*3)+1];
-      aos[e].omegai[2] = input->omega[(i*3)+2];
-      aos[e].omegaj[0] = input->omega[(j*3)];
-      aos[e].omegaj[1] = input->omega[(j*3)+1];
-      aos[e].omegaj[2] = input->omega[(j*3)+2];
-
-      aos[e].radiusi = input->radius[i];
-      aos[e].radiusj = input->radius[j];
-
-      aos[e].massi = input->mass[i];
-      aos[e].massj = input->mass[j];
-
-      aos[e].typei = input->type[i];
-      aos[e].typej = input->type[j];
-
-      shear[e].x = input->shear[(e*3)];
-      shear[e].y = input->shear[(e*3)+1];
-      shear[e].z = input->shear[(e*3)+2];
-    }
-
-    struct contact *d_aos;
-    const int d_aos_size = input->nedge * sizeof(struct contact);
-    ASSERT_NO_CUDA_ERROR(
-      cudaMalloc((void **)&d_aos, d_aos_size));
     ASSERT_NO_CUDA_ERROR(
       cudaMemcpy(d_aos, aos, d_aos_size, cudaMemcpyHostToDevice));
-
     double3 *d_force_delta;
     double3 *d_torquei_delta;
     double3 *d_torquej_delta;
@@ -787,14 +792,13 @@ double array_of_struct(int argc, char **argv,
     }
 
     //cleanup
-    delete[] aos;
-    cudaFree(d_aos);
     cudaFree(d_force_delta);
     cudaFree(d_torquei_delta);
     cudaFree(d_torquej_delta);
     cudaFree(d_shear);
   }
 
+  cudaFree(d_aos);
   cudaFree(d_ioffset);
   cudaFree(d_icount);
   cudaFree(d_imapinv);
@@ -803,7 +807,7 @@ double array_of_struct(int argc, char **argv,
   cudaFree(d_jmapinv);
 
   printf("One time costs\n");
-  for (int i=4; i<5; i++) {
+  for (int i=4; i<6; i++) {
     printf("%d [%s] %.1fms\n", i, timers[i].get_name().c_str(), timers[i].total_time());
   }
   printf("Timer breakdown\n");
